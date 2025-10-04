@@ -45,20 +45,20 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
     async def _on_devices_update(self, data: dict[str, Any]) -> None:
         """Handle device update events from WebSocket."""
         _LOGGER.debug("Received device update via WebSocket")
-        # Trigger coordinator update
-        await self.async_set_updated_data(await self._async_update_data())
+        # Trigger coordinator refresh
+        await self.async_request_refresh()
 
     async def _on_devices_deleted(self, data: dict[str, Any]) -> None:
         """Handle device deletion events from WebSocket."""
         _LOGGER.debug("Received device deletion via WebSocket")
-        # Trigger coordinator update
-        await self.async_set_updated_data(await self._async_update_data())
+        # Trigger coordinator refresh
+        await self.async_request_refresh()
 
     async def _on_zones_update(self, data: dict[str, Any]) -> None:
         """Handle zone update events from WebSocket."""
         _LOGGER.debug("Received zone update via WebSocket")
-        # Trigger coordinator update if needed
-        await self.async_set_updated_data(await self._async_update_data())
+        # Trigger coordinator refresh
+        await self.async_request_refresh()
 
     async def _on_scan_progress(self, data: dict[str, Any]) -> None:
         """Handle scan progress events from WebSocket."""
