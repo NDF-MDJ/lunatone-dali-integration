@@ -41,6 +41,11 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
         self.device.register_event_callback("devicesDeleted", self._on_devices_deleted)
         self.device.register_event_callback("zones", self._on_zones_update)
         self.device.register_event_callback("scanProgress", self._on_scan_progress)
+        self.device.register_event_callback("daliMonitor", self._on_dali_monitor)
+        self.device.register_event_callback("daliStatus", self._on_dali_status)
+
+        # Track last DALI monitor activity to debounce refresh requests
+        self._last_dali_activity: float = 0
 
     async def _on_devices_update(self, data: dict[str, Any]) -> None:
         """Handle device update events from WebSocket.
@@ -128,6 +133,57 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
         status = data.get("status")
         progress = data.get("progress", 0)
         _LOGGER.info("DALI scan progress: %s%% - %s", progress, status)
+
+    async def _on_dali_status(self, data: dict[str, Any]) -> None:
+        """Handle DALI bus status events from WebSocket.
+
+        Status code 2 means DALI bus power is ON. When we see this,
+        devices may have powered up and we should refresh device states.
+        """
+        status_code = data.get("status")
+        line = data.get("line", 0)
+
+        _LOGGER.debug("DALI bus status change: status=%s, line=%s", status_code, line)
+
+        # Status code 2 = DALI bus powered ON
+        if status_code == 2:
+            _LOGGER.info("DALI bus powered ON - refreshing device states")
+            # Request a refresh to check for devices that may have powered up
+            await self.async_request_refresh()
+
+    async def _on_dali_monitor(self, data: dict[str, Any]) -> None:
+        """Handle DALI bus monitor events from WebSocket.
+
+        When we see 8-bit answers (device responses), it means a device
+        is communicating on the bus. This might indicate a device has
+        powered up or changed state.
+        """
+        import time
+
+        bits = data.get("bits")
+        dali_data = data.get("data", [])
+        framing_error = data.get("framingError", False)
+
+        # Only interested in 8-bit answers (device responses)
+        if bits != 8 or framing_error:
+            return
+
+        # Debounce: only refresh if we haven't seen activity in the last 5 seconds
+        # This prevents spam when there's lots of bus activity
+        current_time = time.time()
+        if current_time - self._last_dali_activity < 5.0:
+            return
+
+        self._last_dali_activity = current_time
+
+        _LOGGER.debug(
+            "DALI device activity detected (answer: %s) - scheduling refresh",
+            dali_data
+        )
+
+        # Schedule a refresh to check for state changes
+        # Use async_request_refresh which will debounce multiple rapid requests
+        await self.async_request_refresh()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from the DALI2 IoT device.

@@ -210,6 +210,32 @@ class Dali2IotDevice:
                 event_data.get("version"),
                 event_data.get("tier")
             )
+        elif event_type == "daliStatus":
+            status_code = event_data.get("status")
+            line = event_data.get("line", 0)
+            status_messages = {
+                0: "DALI bus power OFF",
+                1: "System failure",
+                2: "DALI bus power ON",
+                3: "Send buffer full",
+                4: "Send buffer empty",
+                5: "DALI bus power low"
+            }
+            _WS_LOGGER.info(
+                "   └─ 📡 DALI Status (line %s): %s",
+                line,
+                status_messages.get(status_code, f"Unknown status {status_code}")
+            )
+        elif event_type == "daliMonitor":
+            bits = event_data.get("bits")
+            dali_data = event_data.get("data", [])
+            line = event_data.get("line", 0)
+            _WS_LOGGER.debug(
+                "   └─ 📡 DALI Monitor (line %s): %d bits, data=%s",
+                line,
+                bits,
+                dali_data
+            )
         else:
             # Log other event types with full data at debug level
             _WS_LOGGER.debug("   └─ Data: %s", event_data)

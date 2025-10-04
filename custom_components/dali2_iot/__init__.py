@@ -50,11 +50,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     # Configure event filtering to reduce unnecessary traffic
-    # Filter out DALI monitor events by default (can be noisy)
+    # Keep daliMonitor enabled to detect when devices power up
+    # Only filter out file upload events
     try:
         await device.async_set_event_filter({
-            "daliMonitor": True,  # Filter out DALI bus monitoring
-            "fileUpload": True,   # Filter out file upload events
+            "daliMonitor": False,  # Keep DALI bus monitoring to detect device power-up
+            "fileUpload": True,    # Filter out file upload events
         })
     except Exception as err:
         _LOGGER.warning("Failed to set WebSocket event filters: %s", err)
