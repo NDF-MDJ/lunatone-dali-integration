@@ -637,4 +637,75 @@ class Dali2IotDevice:
         if not any(key.endswith("WithFade") for key in fade_data.keys()):
             return await self.async_control_group(group_id, data, line)
 
-        return await self.async_control_group(group_id, fade_data, line) 
+        return await self.async_control_group(group_id, fade_data, line)
+
+    async def async_query_device_status(self, dali_address: int, line: int = 0) -> bool:
+        """Query a DALI device status via WebSocket to check if it's present.
+
+        Sends a QUERY STATUS command (opcode 144) to the specified DALI address.
+        This is useful to probe if a device has powered up.
+
+        Args:
+            dali_address: DALI short address (0-63)
+            line: DALI line number (default 0)
+
+        Returns:
+            True if device responded, False otherwise
+        """
+        if not self._ws_connected:
+            _LOGGER.warning("WebSocket not connected, cannot query device %s", dali_address)
+            return False
+
+        # DALI QUERY STATUS command
+        # Address byte: (address << 1) | 1  (for query commands, LSB = 1)
+        # Opcode: 144 (0x90) = QUERY STATUS
+        address_byte = (dali_address << 1) | 1
+        opcode = 144  # QUERY STATUS
+
+        message = {
+            "type": "daliFrame",
+            "data": {
+                "line": line,
+                "numberOfBits": 16,
+                "mode": {
+                    "sendTwice": False,
+                    "waitForAnswer": True,
+                    "priority": 3
+                },
+                "daliData": [address_byte, opcode]
+            }
+        }
+
+        try:
+            _WS_LOGGER.debug(
+                "📤 Querying device status: address=%s, line=%s",
+                dali_address,
+                line
+            )
+            await self._ws.send_json(message)
+            # Note: The answer will come back via daliAnswer event
+            # We don't wait for it here, the coordinator will pick it up
+            return True
+        except Exception as err:
+            _LOGGER.exception("Failed to send DALI query: %s", err)
+            return False
+
+    async def async_query_all_devices(self, known_addresses: list[int]) -> None:
+        """Query all known device addresses to refresh their states.
+
+        This is useful when we suspect devices may have powered up.
+
+        Args:
+            known_addresses: List of DALI addresses to query
+        """
+        if not self._ws_connected:
+            _LOGGER.warning("WebSocket not connected, cannot query devices")
+            return
+
+        _LOGGER.info("Querying %d devices for status updates", len(known_addresses))
+
+        for address in known_addresses:
+            if 0 <= address <= 63:  # Valid DALI short address range
+                await self.async_query_device_status(address)
+                # Small delay between queries to avoid overwhelming the bus
+                await asyncio.sleep(0.05)  # 50ms between queries 

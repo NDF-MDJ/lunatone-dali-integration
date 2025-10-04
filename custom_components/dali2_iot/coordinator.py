@@ -147,8 +147,10 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
 
         # Status code 2 = DALI bus powered ON
         if status_code == 2:
-            _LOGGER.info("DALI bus powered ON - refreshing device states")
-            # Request a refresh to check for devices that may have powered up
+            _LOGGER.info("DALI bus powered ON - probing all known devices")
+            # Actively query all devices to see if any have powered up
+            await self._probe_all_devices()
+            # Also request a full refresh to get updated states
             await self.async_request_refresh()
 
     async def _on_dali_monitor(self, data: dict[str, Any]) -> None:
@@ -195,6 +197,28 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
         # Schedule a refresh to check for state changes
         # Use async_request_refresh which will debounce multiple rapid requests
         await self.async_request_refresh()
+
+    async def _probe_all_devices(self) -> None:
+        """Actively probe all known devices via DALI query commands.
+
+        This sends QUERY STATUS commands to all known device addresses
+        to check if they're present and responsive. Useful when we suspect
+        devices may have powered up.
+        """
+        if not self._devices:
+            _LOGGER.debug("No known devices to probe")
+            return
+
+        # Extract DALI addresses from known devices
+        addresses = []
+        for device in self._devices:
+            address = device.get("address")
+            if address is not None and 0 <= address <= 63:
+                addresses.append(address)
+
+        if addresses:
+            _LOGGER.info("Probing %d device addresses: %s", len(addresses), addresses)
+            await self.device.async_query_all_devices(addresses)
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from the DALI2 IoT device.
