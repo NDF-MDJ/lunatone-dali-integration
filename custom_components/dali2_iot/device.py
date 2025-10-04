@@ -13,6 +13,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+_WS_LOGGER = logging.getLogger(f"{__name__}.websocket")
 
 API_TIMEOUT: Final = 10.0
 BASE_URL: Final = "http://{host}"
@@ -125,26 +126,26 @@ class Dali2IotDevice:
         """Handle WebSocket connection with automatic reconnection."""
         while self._should_reconnect:
             try:
-                _LOGGER.info("Connecting to WebSocket at %s", self._ws_url)
+                _WS_LOGGER.info("Connecting to WebSocket at %s", self._ws_url)
                 async with self._session.ws_connect(self._ws_url) as ws:
                     self._ws = ws
                     self._ws_connected = True
-                    _LOGGER.info("WebSocket connected to %s", self._host)
+                    _WS_LOGGER.info("✅ WebSocket connected to %s", self._host)
 
                     # Process incoming messages
                     await self._ws_message_handler()
 
             except aiohttp.ClientError as err:
-                _LOGGER.error("WebSocket connection error: %s", err)
+                _WS_LOGGER.error("❌ WebSocket connection error: %s", err)
             except Exception as err:
-                _LOGGER.exception("Unexpected error in WebSocket connection: %s", err)
+                _WS_LOGGER.exception("❌ Unexpected error in WebSocket connection: %s", err)
             finally:
                 self._ws_connected = False
                 self._ws = None
 
             # Reconnect after delay if we should reconnect
             if self._should_reconnect:
-                _LOGGER.info("Reconnecting WebSocket in %s seconds", WS_RECONNECT_DELAY)
+                _WS_LOGGER.info("🔄 Reconnecting WebSocket in %s seconds", WS_RECONNECT_DELAY)
                 await asyncio.sleep(WS_RECONNECT_DELAY)
 
     async def _ws_message_handler(self) -> None:
@@ -153,22 +154,65 @@ class Dali2IotDevice:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
+                    _WS_LOGGER.debug("📥 Raw WebSocket message: %s", msg.data[:200])  # First 200 chars
                     await self._handle_ws_event(data)
                 except json.JSONDecodeError as err:
-                    _LOGGER.error("Failed to decode WebSocket message: %s", err)
+                    _WS_LOGGER.error("❌ Failed to decode WebSocket message: %s", err)
             elif msg.type == aiohttp.WSMsgType.ERROR:
-                _LOGGER.error("WebSocket error: %s", self._ws.exception())
+                _WS_LOGGER.error("❌ WebSocket error: %s", self._ws.exception())
                 break
             elif msg.type == aiohttp.WSMsgType.CLOSED:
-                _LOGGER.warning("WebSocket connection closed")
+                _WS_LOGGER.warning("⚠️  WebSocket connection closed")
                 break
 
     async def _handle_ws_event(self, data: dict[str, Any]) -> None:
         """Handle a WebSocket event."""
         event_type = data.get("type")
         event_data = data.get("data", {})
+        time_signature = data.get("timeSignature", {})
 
-        _LOGGER.debug("Received WebSocket event: %s", event_type)
+        # Log the event with details
+        _WS_LOGGER.info(
+            "📨 Event: %s | Timestamp: %s | Counter: %s",
+            event_type,
+            time_signature.get("timestamp"),
+            time_signature.get("counter")
+        )
+
+        # Log event data (truncated for readability)
+        if event_type == "devices":
+            devices = event_data.get("devices", [])
+            _WS_LOGGER.info("   └─ Devices updated: %d device(s)", len(devices))
+            for device in devices:
+                _WS_LOGGER.debug(
+                    "      └─ Device %s (addr=%s): %s",
+                    device.get("id"),
+                    device.get("address"),
+                    {k: v for k, v in device.items() if k in ["name", "features", "groups"]}
+                )
+        elif event_type == "devicesDeleted":
+            deleted = event_data.get("deleted", [])
+            _WS_LOGGER.info("   └─ Devices deleted: %s", deleted)
+        elif event_type == "zones":
+            zones = event_data.get("zones", [])
+            _WS_LOGGER.info("   └─ Zones updated: %d zone(s)", len(zones))
+        elif event_type == "scanProgress":
+            _WS_LOGGER.info(
+                "   └─ Scan: %s%% - %s (found: %s)",
+                event_data.get("progress", 0),
+                event_data.get("status"),
+                event_data.get("found", 0)
+            )
+        elif event_type == "info":
+            _WS_LOGGER.info(
+                "   └─ Device: %s | Version: %s | Tier: %s",
+                event_data.get("name"),
+                event_data.get("version"),
+                event_data.get("tier")
+            )
+        else:
+            # Log other event types with full data at debug level
+            _WS_LOGGER.debug("   └─ Data: %s", event_data)
 
         # Call registered callbacks for this event type
         if event_type in self._event_callbacks:
@@ -176,7 +220,7 @@ class Dali2IotDevice:
                 try:
                     await callback(event_data)
                 except Exception as err:
-                    _LOGGER.exception("Error in event callback for %s: %s", event_type, err)
+                    _WS_LOGGER.exception("❌ Error in event callback for %s: %s", event_type, err)
 
         # Handle special event types
         if event_type == "info":
@@ -192,7 +236,7 @@ class Dali2IotDevice:
 
     async def _handle_info_event(self, data: dict[str, Any]) -> None:
         """Handle info event (greeting message)."""
-        _LOGGER.info("Received device info: %s", data.get("name"))
+        _WS_LOGGER.info("✅ Received device info greeting")
         # Update device info
         if data:
             self._device_info = DeviceInfo(
@@ -215,14 +259,17 @@ class Dali2IotDevice:
 
             if existing_device:
                 # Update existing device with new data
+                _WS_LOGGER.debug("🔄 Updated device %s", device_id)
                 existing_device.update(new_device)
             else:
                 # Add new device
+                _WS_LOGGER.debug("➕ Added new device %s", device_id)
                 self._devices.append(new_device)
 
     async def _handle_devices_deleted_event(self, data: dict[str, Any]) -> None:
         """Handle devices deleted event."""
         deleted_ids = data.get("deleted", [])
+        _WS_LOGGER.info("🗑️  Removed %d device(s)", len(deleted_ids))
 
         # Remove deleted devices
         self._devices = [d for d in self._devices if d.get("id") not in deleted_ids]
@@ -231,12 +278,12 @@ class Dali2IotDevice:
         """Handle DALI answer from the bus."""
         # Match with pending command if any
         # This is for future command/response correlation
-        _LOGGER.debug("Received DALI answer: %s", data)
+        _WS_LOGGER.debug("📡 DALI answer: %s", data)
 
     async def _handle_dali_frame(self, data: dict[str, Any]) -> None:
         """Handle DALI frame confirmation."""
         # Match with pending command if any
-        _LOGGER.debug("Received DALI frame confirmation: %s", data)
+        _WS_LOGGER.debug("📡 DALI frame confirmation: %s", data)
 
     async def async_send_ws_message(self, message: dict[str, Any]) -> None:
         """Send a message via WebSocket."""
@@ -244,13 +291,16 @@ class Dali2IotDevice:
             raise Dali2IotConnectionError("WebSocket not connected")
 
         try:
+            _WS_LOGGER.debug("📤 Sending: %s", message)
             await self._ws.send_json(message)
+            _WS_LOGGER.debug("✅ Message sent successfully")
         except Exception as err:
-            _LOGGER.error("Failed to send WebSocket message: %s", err)
+            _WS_LOGGER.error("❌ Failed to send WebSocket message: %s", err)
             raise Dali2IotConnectionError(f"Failed to send message: {err}") from err
 
     async def async_set_event_filter(self, filters: dict[str, bool]) -> None:
         """Set WebSocket event filters."""
+        _WS_LOGGER.info("🔧 Setting event filters: %s", filters)
         message = {
             "type": "filtering",
             "data": filters

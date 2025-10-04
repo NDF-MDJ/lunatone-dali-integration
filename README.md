@@ -337,14 +337,55 @@ Interested in implementing any of these features? The DALI-2 IoT API documentati
 
 ## Development
 
-This integration is under active development and testing. While basic functionality works, it should be considered experimental. Use at your own risk and please report any issues you encounter. 
+This integration is under active development and testing. While basic functionality works, it should be considered experimental. Use at your own risk and please report any issues you encounter.
 
 ### Key Components
-- `device.py` - Core device communication
-- `coordinator.py` - Data coordination and caching  
+- `device.py` - Core device communication with WebSocket support
+- `coordinator.py` - Data coordination and caching
 - `light.py` - Light entity implementation with optimistic updates
 - `config_flow.py` - Configuration and options flow
 - `discovery.py` - UDP auto-discovery implementation
+
+### WebSocket Event Logging
+
+The integration uses WebSocket for real-time communication with the DALI2 IoT controller. WebSocket events are logged to a separate logger for easier debugging and monitoring.
+
+#### Basic Logging Configuration
+
+To enable WebSocket event logging, add the following to your Home Assistant `configuration.yaml`:
+
+```yaml
+logger:
+  default: warning
+  logs:
+    # WebSocket events (connection, incoming/outgoing messages, events)
+    custom_components.dali2_iot.device.websocket: info
+    # General integration logs (device control, coordinator updates)
+    custom_components.dali2_iot: info
+```
+
+#### Log Levels
+
+- **`debug`**: Detailed message contents and device data
+- **`info`**: Connection status, event types, and key operations (recommended for testing)
+- **`warning`**: Only errors and warnings
+
+#### Understanding WebSocket Logs
+
+WebSocket logs use emoji markers for easy visual identification:
+- ✅ Successful connections
+- ❌ Connection errors
+- 🔄 Reconnection attempts
+- 📨 Incoming events (devices, zones, scan progress)
+- 📤 Outgoing messages (commands, filters)
+- 📡 DALI bus messages
+
+Example log output:
+```
+2025-10-04 12:00:00 INFO [custom_components.dali2_iot.device.websocket] ✅ WebSocket connected to 192.168.1.100
+2025-10-04 12:00:01 INFO [custom_components.dali2_iot.device.websocket] 📨 Event: devices | Timestamp: 1234567890 | Counter: 42
+2025-10-04 12:00:01 INFO [custom_components.dali2_iot.device.websocket]    └─ Devices updated: 5 device(s)
+```
 
 ## License
 
