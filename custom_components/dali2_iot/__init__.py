@@ -38,9 +38,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session=session,
     )
 
+    # Connect WebSocket
+    _LOGGER.info("Connecting to DALI2 IoT device at %s via WebSocket", entry.data["host"])
+    await device.async_connect()
+
     # Create coordinator
     coordinator = Dali2IotCoordinator(hass, device)
+
+    # Initial data fetch via REST API (fallback)
+    # The WebSocket will provide updates after connection
     await coordinator.async_config_entry_first_refresh()
+
+    # Configure event filtering to reduce unnecessary traffic
+    # Filter out DALI monitor events by default (can be noisy)
+    try:
+        await device.async_set_event_filter({
+            "daliMonitor": True,  # Filter out DALI bus monitoring
+            "fileUpload": True,   # Filter out file upload events
+        })
+    except Exception as err:
+        _LOGGER.warning("Failed to set WebSocket event filters: %s", err)
 
     # Store coordinator
     hass.data[DOMAIN][entry.entry_id] = coordinator
@@ -330,5 +347,7 @@ async def _async_setup_services(hass: HomeAssistant) -> None:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, ["light"]):
-        hass.data[DOMAIN].pop(entry.entry_id)
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        # Disconnect WebSocket
+        await coordinator.device.async_disconnect()
     return unload_ok 

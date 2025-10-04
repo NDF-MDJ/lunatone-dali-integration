@@ -5,7 +5,9 @@ import aiohttp
 import asyncio
 import async_timeout
 import logging
-from typing import Any, Final
+import json
+from typing import Any, Final, Callable
+from collections.abc import Awaitable
 
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -14,6 +16,9 @@ _LOGGER = logging.getLogger(__name__)
 
 API_TIMEOUT: Final = 10.0
 BASE_URL: Final = "http://{host}"
+WS_URL: Final = "ws://{host}"
+WS_RECONNECT_DELAY: Final = 5.0
+WS_PING_INTERVAL: Final = 30.0
 
 class Dali2IotConnectionError(Exception):
     """Error to indicate we cannot connect to the device."""
@@ -32,8 +37,23 @@ class Dali2IotDevice:
         self._name = name
         self._session = session
         self._base_url = BASE_URL.format(host=host)
+        self._ws_url = WS_URL.format(host=host)
         self._device_info: DeviceInfo | None = None
         self._devices: list[dict[str, Any]] = []
+
+        # WebSocket state
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+        self._ws_connected: bool = False
+        self._ws_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
+        self._should_reconnect: bool = True
+
+        # Event callbacks
+        self._event_callbacks: dict[str, list[Callable[[dict[str, Any]], Awaitable[None]]]] = {}
+
+        # Command response handling
+        self._pending_commands: dict[str, asyncio.Future] = {}
+        self._command_counter: int = 0
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -46,6 +66,196 @@ class Dali2IotDevice:
                 model="DALI2 IoT",
             )
         return self._device_info
+
+    @property
+    def is_connected(self) -> bool:
+        """Return if WebSocket is connected."""
+        return self._ws_connected
+
+    def register_event_callback(
+        self, event_type: str, callback: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        """Register a callback for a specific event type."""
+        if event_type not in self._event_callbacks:
+            self._event_callbacks[event_type] = []
+        self._event_callbacks[event_type].append(callback)
+
+    def unregister_event_callback(
+        self, event_type: str, callback: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        """Unregister a callback for a specific event type."""
+        if event_type in self._event_callbacks:
+            self._event_callbacks[event_type].remove(callback)
+
+    async def async_connect(self) -> None:
+        """Connect to the WebSocket."""
+        if self._ws_task and not self._ws_task.done():
+            _LOGGER.debug("WebSocket connection already in progress")
+            return
+
+        self._should_reconnect = True
+        self._ws_task = asyncio.create_task(self._ws_connection_handler())
+
+    async def async_disconnect(self) -> None:
+        """Disconnect from the WebSocket."""
+        self._should_reconnect = False
+
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+            self._reconnect_task = None
+
+        if self._ws_task:
+            self._ws_task.cancel()
+            try:
+                await self._ws_task
+            except asyncio.CancelledError:
+                pass
+            self._ws_task = None
+
+        if self._ws and not self._ws.closed:
+            await self._ws.close()
+        self._ws = None
+        self._ws_connected = False
+
+    async def _ws_connection_handler(self) -> None:
+        """Handle WebSocket connection with automatic reconnection."""
+        while self._should_reconnect:
+            try:
+                _LOGGER.info("Connecting to WebSocket at %s", self._ws_url)
+                async with self._session.ws_connect(self._ws_url) as ws:
+                    self._ws = ws
+                    self._ws_connected = True
+                    _LOGGER.info("WebSocket connected to %s", self._host)
+
+                    # Process incoming messages
+                    await self._ws_message_handler()
+
+            except aiohttp.ClientError as err:
+                _LOGGER.error("WebSocket connection error: %s", err)
+            except Exception as err:
+                _LOGGER.exception("Unexpected error in WebSocket connection: %s", err)
+            finally:
+                self._ws_connected = False
+                self._ws = None
+
+            # Reconnect after delay if we should reconnect
+            if self._should_reconnect:
+                _LOGGER.info("Reconnecting WebSocket in %s seconds", WS_RECONNECT_DELAY)
+                await asyncio.sleep(WS_RECONNECT_DELAY)
+
+    async def _ws_message_handler(self) -> None:
+        """Handle incoming WebSocket messages."""
+        async for msg in self._ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    await self._handle_ws_event(data)
+                except json.JSONDecodeError as err:
+                    _LOGGER.error("Failed to decode WebSocket message: %s", err)
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                _LOGGER.error("WebSocket error: %s", self._ws.exception())
+                break
+            elif msg.type == aiohttp.WSMsgType.CLOSED:
+                _LOGGER.warning("WebSocket connection closed")
+                break
+
+    async def _handle_ws_event(self, data: dict[str, Any]) -> None:
+        """Handle a WebSocket event."""
+        event_type = data.get("type")
+        event_data = data.get("data", {})
+
+        _LOGGER.debug("Received WebSocket event: %s", event_type)
+
+        # Call registered callbacks for this event type
+        if event_type in self._event_callbacks:
+            for callback in self._event_callbacks[event_type]:
+                try:
+                    await callback(event_data)
+                except Exception as err:
+                    _LOGGER.exception("Error in event callback for %s: %s", event_type, err)
+
+        # Handle special event types
+        if event_type == "info":
+            await self._handle_info_event(event_data)
+        elif event_type == "devices":
+            await self._handle_devices_event(event_data)
+        elif event_type == "devicesDeleted":
+            await self._handle_devices_deleted_event(event_data)
+        elif event_type == "daliAnswer":
+            await self._handle_dali_answer(data)
+        elif event_type == "daliFrame":
+            await self._handle_dali_frame(data)
+
+    async def _handle_info_event(self, data: dict[str, Any]) -> None:
+        """Handle info event (greeting message)."""
+        _LOGGER.info("Received device info: %s", data.get("name"))
+        # Update device info
+        if data:
+            self._device_info = DeviceInfo(
+                identifiers={("dali2_iot", self._host)},
+                name=data.get("name", self._name),
+                manufacturer="Lunatone",
+                model="DALI2 IoT",
+                sw_version=data.get("version"),
+            )
+
+    async def _handle_devices_event(self, data: dict[str, Any]) -> None:
+        """Handle devices event."""
+        devices = data.get("devices", [])
+
+        # Update or add devices
+        for new_device in devices:
+            device_id = new_device.get("id")
+            # Find existing device
+            existing_device = next((d for d in self._devices if d.get("id") == device_id), None)
+
+            if existing_device:
+                # Update existing device with new data
+                existing_device.update(new_device)
+            else:
+                # Add new device
+                self._devices.append(new_device)
+
+    async def _handle_devices_deleted_event(self, data: dict[str, Any]) -> None:
+        """Handle devices deleted event."""
+        deleted_ids = data.get("deleted", [])
+
+        # Remove deleted devices
+        self._devices = [d for d in self._devices if d.get("id") not in deleted_ids]
+
+    async def _handle_dali_answer(self, data: dict[str, Any]) -> None:
+        """Handle DALI answer from the bus."""
+        # Match with pending command if any
+        # This is for future command/response correlation
+        _LOGGER.debug("Received DALI answer: %s", data)
+
+    async def _handle_dali_frame(self, data: dict[str, Any]) -> None:
+        """Handle DALI frame confirmation."""
+        # Match with pending command if any
+        _LOGGER.debug("Received DALI frame confirmation: %s", data)
+
+    async def async_send_ws_message(self, message: dict[str, Any]) -> None:
+        """Send a message via WebSocket."""
+        if not self._ws or not self._ws_connected:
+            raise Dali2IotConnectionError("WebSocket not connected")
+
+        try:
+            await self._ws.send_json(message)
+        except Exception as err:
+            _LOGGER.error("Failed to send WebSocket message: %s", err)
+            raise Dali2IotConnectionError(f"Failed to send message: {err}") from err
+
+    async def async_set_event_filter(self, filters: dict[str, bool]) -> None:
+        """Set WebSocket event filters."""
+        message = {
+            "type": "filtering",
+            "data": filters
+        }
+        await self.async_send_ws_message(message)
 
     async def async_get_info(self) -> dict[str, Any]:
         """Get device information."""
@@ -61,19 +271,29 @@ class Dali2IotDevice:
             raise Dali2IotConnectionError(f"Connection failed to {self._host}: {err}") from err
 
     async def async_get_devices(self) -> list[dict[str, Any]]:
-        """Get list of devices from the DALI2 IoT controller."""
-        try:
-            async with async_timeout.timeout(API_TIMEOUT):
-                async with self._session.get(f"{self._base_url}/devices") as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        self._devices = data.get("devices", [])
-                        return self._devices
-                    _LOGGER.error("Failed to get devices from %s: %s", self._host, response.status)
-                    raise Dali2IotConnectionError(f"Invalid response from device at {self._host}: {response.status}")
-        except (asyncio.TimeoutError, aiohttp.ClientError) as err:
-            _LOGGER.error("Error getting devices from %s: %s", self._host, err)
-            raise Dali2IotConnectionError(f"Connection failed to {self._host}: {err}") from err
+        """Get list of devices from the DALI2 IoT controller.
+
+        Returns cached device list which is automatically updated via WebSocket events.
+        If WebSocket is not connected, falls back to REST API.
+        """
+        if self._ws_connected:
+            # Return cached devices from WebSocket events
+            return self._devices
+        else:
+            # Fallback to REST API if WebSocket not connected
+            _LOGGER.warning("WebSocket not connected, falling back to REST API for device list")
+            try:
+                async with async_timeout.timeout(API_TIMEOUT):
+                    async with self._session.get(f"{self._base_url}/devices") as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            self._devices = data.get("devices", [])
+                            return self._devices
+                        _LOGGER.error("Failed to get devices from %s: %s", self._host, response.status)
+                        raise Dali2IotConnectionError(f"Invalid response from device at {self._host}: {response.status}")
+            except (asyncio.TimeoutError, aiohttp.ClientError) as err:
+                _LOGGER.error("Error getting devices from %s: %s", self._host, err)
+                raise Dali2IotConnectionError(f"Connection failed to {self._host}: {err}") from err
 
     async def async_control_device(
         self, device_id: int, data: dict[str, Any]
