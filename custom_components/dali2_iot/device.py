@@ -677,10 +677,12 @@ class Dali2IotDevice:
         }
 
         try:
-            _WS_LOGGER.debug(
-                "📤 Querying device status: address=%s, line=%s",
+            _WS_LOGGER.info(
+                "📤 Querying device status: DALI address=%s, line=%s, command=[%s, %s]",
                 dali_address,
-                line
+                line,
+                address_byte,
+                opcode
             )
             await self._ws.send_json(message)
             # Note: The answer will come back via daliAnswer event

@@ -47,6 +47,10 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
         # Track last DALI monitor activity to debounce refresh requests
         self._last_dali_activity: float = 0
 
+        # Track last device probe time
+        self._last_probe_time: float = 0
+        self._probe_interval: float = 60.0  # Probe devices every 60 seconds
+
     async def _on_devices_update(self, data: dict[str, Any]) -> None:
         """Handle device update events from WebSocket.
 
@@ -226,7 +230,18 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
         With WebSocket connection, this mostly returns cached data that's
         automatically updated via events. The update_interval serves as a
         fallback health check.
+
+        Also periodically probes all known devices to detect when they power up.
         """
+        import time
+
+        # Check if it's time to probe devices
+        current_time = time.time()
+        if current_time - self._last_probe_time >= self._probe_interval:
+            _LOGGER.info("Periodic device probe starting (every %s seconds)", self._probe_interval)
+            await self._probe_all_devices()
+            self._last_probe_time = current_time
+
         devices = await self.device.async_get_devices()
         self._devices = devices
 
