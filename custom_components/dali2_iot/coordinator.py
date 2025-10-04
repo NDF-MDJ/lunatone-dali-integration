@@ -43,10 +43,73 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
         self.device.register_event_callback("scanProgress", self._on_scan_progress)
 
     async def _on_devices_update(self, data: dict[str, Any]) -> None:
-        """Handle device update events from WebSocket."""
-        _LOGGER.debug("Received device update via WebSocket")
-        # Trigger coordinator refresh
-        await self.async_request_refresh()
+        """Handle device update events from WebSocket.
+
+        WebSocket device events contain only changed properties, not full device data.
+        We need to merge these partial updates with our cached device list.
+        """
+        devices_data = data.get("devices", [])
+        _LOGGER.debug("Received device update via WebSocket: %s device(s)", len(devices_data))
+
+        # Check if this is a full device update (new devices with all properties)
+        # or a partial update (only changed properties)
+        needs_full_refresh = False
+
+        for device_update in devices_data:
+            device_id = device_update.get("id")
+            if not device_id:
+                continue
+
+            # Find the existing device in our cache
+            existing_device = None
+            for idx, dev in enumerate(self._devices):
+                if dev.get("id") == device_id:
+                    existing_device = self._devices[idx]
+                    break
+
+            # If this device has a "name" field, it's a full update (new device)
+            # If it only has "id" and "features", it's a partial update (state change)
+            if "name" in device_update or "address" in device_update:
+                # Full device data - this is a new device or complete update
+                if existing_device:
+                    # Update existing device with new full data
+                    self._devices[idx] = device_update
+                else:
+                    # New device - add it
+                    self._devices.append(device_update)
+                _LOGGER.debug("Full device update for device %s", device_id)
+            else:
+                # Partial update - merge with existing device
+                if existing_device:
+                    # Merge the partial update into existing device
+                    if "features" in device_update:
+                        # Update features
+                        existing_features = existing_device.get("features", {})
+                        for feature_name, feature_data in device_update["features"].items():
+                            existing_features[feature_name] = feature_data
+                        existing_device["features"] = existing_features
+                    if "groups" in device_update:
+                        # Update groups
+                        existing_device["groups"] = device_update["groups"]
+                    _LOGGER.debug("Partial device update for device %s (cached)", device_id)
+                else:
+                    # We don't have this device cached - need full refresh
+                    _LOGGER.warning(
+                        "Received partial update for unknown device %s - requesting full refresh",
+                        device_id
+                    )
+                    needs_full_refresh = True
+
+        if needs_full_refresh:
+            # We received an update for a device we don't know about
+            # Request a full refresh to get complete device data
+            await self.async_request_refresh()
+        else:
+            # Update groups based on new device data
+            self._groups = self._extract_groups_from_devices(self._devices)
+
+            # Notify listeners that data has changed (without doing a full refresh)
+            self.async_set_updated_data({"devices": self._devices, "groups": self._groups})
 
     async def _on_devices_deleted(self, data: dict[str, Any]) -> None:
         """Handle device deletion events from WebSocket."""
