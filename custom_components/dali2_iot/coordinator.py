@@ -154,18 +154,23 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
     async def _on_dali_monitor(self, data: dict[str, Any]) -> None:
         """Handle DALI bus monitor events from WebSocket.
 
-        When we see 8-bit answers (device responses), it means a device
-        is communicating on the bus. This might indicate a device has
-        powered up or changed state.
+        When we see device responses (8-bit answers), especially from external
+        sources (like physical switches), we should refresh device states.
         """
         import time
 
         bits = data.get("bits")
         dali_data = data.get("data", [])
         framing_error = data.get("framingError", False)
+        external_source = data.get("externalSource", False)
 
-        # Only interested in 8-bit answers (device responses)
-        if bits != 8 or framing_error:
+        # We're interested in:
+        # 1. 8-bit answers (device responses) - means a device answered
+        # 2. External 16-bit commands - means someone else is controlling devices
+        is_device_answer = bits == 8 and not framing_error
+        is_external_command = bits == 16 and external_source
+
+        if not (is_device_answer or is_external_command):
             return
 
         # Debounce: only refresh if we haven't seen activity in the last 5 seconds
@@ -176,10 +181,16 @@ class Dali2IotCoordinator(DataUpdateCoordinator):
 
         self._last_dali_activity = current_time
 
-        _LOGGER.debug(
-            "DALI device activity detected (answer: %s) - scheduling refresh",
-            dali_data
-        )
+        if is_external_command:
+            _LOGGER.info(
+                "External DALI command detected (data: %s) - scheduling refresh",
+                dali_data
+            )
+        else:
+            _LOGGER.debug(
+                "DALI device activity detected (answer: %s) - scheduling refresh",
+                dali_data
+            )
 
         # Schedule a refresh to check for state changes
         # Use async_request_refresh which will debounce multiple rapid requests
