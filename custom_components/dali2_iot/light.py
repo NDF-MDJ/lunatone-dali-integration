@@ -217,9 +217,10 @@ class Dali2IotLight(LightEntity):
         # Prepare command data - only send switchable if light is off or explicit turn on
         data = {}
         
-        # Only send switchable=True if light is currently off or it's not just a brightness change
-        if not current_is_on or not brightness_only:
-            data["switchable"] = True
+        # Only send switchable=True if light is currently off or it's not just a brightness change, setting a brightness turns the light implicitly on
+        if (not current_is_on or not brightness_only) and not ATTR_BRIGHTNESS in kwargs:
+            data["gotoLastActive"] = True # Trun on at last active brightness level 
+        #    data["switchable"] = True
         
         if ATTR_BRIGHTNESS in kwargs:
             data["dimmable"] = kwargs[ATTR_BRIGHTNESS] / 2.55
@@ -474,9 +475,10 @@ class Dali2IotGroupLight(LightEntity):
         # Prepare command data - only send switchable if group is off or explicit turn on
         data = {}
         
-        # Only send switchable=True if group is currently off or it's not just a brightness change
-        if not current_is_on or not brightness_only:
-            data["switchable"] = True
+        # Only send switchable=True if group is currently off or it's not just a brightness change, setting a brightness turns the light implicitly on
+        if (not current_is_on or not brightness_only) and not ATTR_BRIGHTNESS in kwargs:
+            data["gotoLastActive"] = True # Trun on at last active brightness level 
+        #    data["switchable"] = True
         
         if ATTR_BRIGHTNESS in kwargs:
             data["dimmable"] = kwargs[ATTR_BRIGHTNESS] / 2.55
